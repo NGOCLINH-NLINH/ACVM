@@ -14,7 +14,7 @@ def main():
     print(f"[INFO] Device: {device}")
 
     print("[INFO] Initializing PromptedViT and DynamicSemanticAnchor")
-    visual_encoder = PromptedViT(model_name='vit_base_patch16_224', prompt_length=10).to(device)
+    visual_encoder = PromptedViT(model_name='vit_small_patch16_224', prompt_length=10).to(device)
     anchor_generator = (DynamicSemanticAnchor(model_name='sentence-transformers/all-MiniLM-L6-v2', ctx_length=8)
                         .to(device))
 
