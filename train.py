@@ -2,6 +2,7 @@ import torch
 from torch.optim import Adam
 import time
 
+import argparse
 import copy
 from core import ACVMLoss
 from datasets.seq_cifar100 import build_task_loaders
@@ -10,7 +11,24 @@ from utils import ContinualMetrics
 from utils.metrics import evaluate_seen_classes
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Huấn luyện mô hình ACVM")
+
+    parser.add_argument('--epochs', type=int, default=20, help='Epochs per task')
+    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--prompt_length', type=int, default=10, help='Visual Prompt length')
+    parser.add_argument('--ctx_length', type=int, default=8, help='Text Context length')
+    parser.add_argument('--alpha_base', type=float, default=0.5, help='Margin for Triplet Loss')
+    parser.add_argument('--delta', type=float, default=0.5, help='Margin for Spread Loss')
+    parser.add_argument('--lambda_spread', type=float, default=1.0, help='Spread Loss weight')
+
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Device: {device}")
 
@@ -19,14 +37,14 @@ def main():
     anchor_generator = (DynamicSemanticAnchor(model_name='sentence-transformers/all-MiniLM-L6-v2', ctx_length=8)
                         .to(device))
 
-    criterion = ACVMLoss(alpha_base=0.5, delta=0.5, lambda_spread=1.0).to(device)
+    criterion = ACVMLoss(alpha_base=args.alpha_base, delta=args.delta, lambda_spread=args.lambda_spread).to(device)
     num_tasks = 10
-    epochs_per_task = 5
+    epochs_per_task = args.epochs
     metrics = ContinualMetrics(num_tasks=num_tasks)
 
     optimizer = Adam([
-        {'params': visual_encoder.visual_prompts, 'lr': 0.01},
-        {'params': anchor_generator.ctx, 'lr': 0.01}
+        {'params': visual_encoder.visual_prompts, 'lr': args.lr},
+        {'params': anchor_generator.ctx, 'lr': args.lr}
     ], weight_decay=1e-4)
 
     print("[INFO] Preparing dataset Seq-CIFAR100")
@@ -39,10 +57,10 @@ def main():
     prev_anchor_generator = None
 
     for task_id in range(num_tasks):
-        print(f"\n" + "=" * 40)
+        print(f"\n" + "=" * 50)
         print(f" START TRAINING TASK {task_id + 1}/{num_tasks} ")
         print(f" Classes: {task_classes_list[task_id]}")
-        print("=" * 40)
+        print("=" * 50)
 
         current_classes_str = task_classes_list[task_id]
         seen_classes_str.extend(current_classes_str)
@@ -78,7 +96,7 @@ def main():
                     else:
                         all_anchors.append(anchor_generator(cls_name))
 
-                all_anchors = torch.stack([anchor_generator(cls_name) for cls_name in seen_classes_str])
+                all_anchors = torch.stack(all_anchors)
 
                 target_anchors = all_anchors[labels]
 
