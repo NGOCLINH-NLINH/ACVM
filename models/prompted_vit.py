@@ -14,7 +14,6 @@ class PromptedViT(nn.Module):
         self.embed_dim = self.backbone.embed_dim
         self.prompt_length = prompt_length
 
-        # Sửa lại thành:
         self.visual_prompts = nn.Parameter(torch.zeros(1, prompt_length, self.embed_dim))
 
         nn.init.trunc_normal_(self.visual_prompts, std=0.02)
@@ -32,7 +31,7 @@ class PromptedViT(nn.Module):
         x = self.backbone.blocks(x)
         x = self.backbone.norm(x)
 
-        z = x[:, 0]
+        z = F.normalize(x[:, 0], p=2, dim=1)
 
         return z
 

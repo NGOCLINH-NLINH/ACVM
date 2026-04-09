@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
+import torch.nn.functional as F
 
 
 class DynamicSemanticAnchor(nn.Module):
@@ -28,6 +29,7 @@ class DynamicSemanticAnchor(nn.Module):
 
         outputs = self.text_encoder(inputs_embeds=prompted_embeds)
 
-        anchor = outputs.last_hidden_state.mean(dim=1).squeeze(0)
+        raw_anchor = outputs.last_hidden_state.mean(dim=1).squeeze(0)
+        anchor = F.normalize(raw_anchor, p=2, dim=0)
 
         return anchor
