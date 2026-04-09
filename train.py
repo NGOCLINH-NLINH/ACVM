@@ -2,6 +2,7 @@ import torch
 from torch.optim import Adam
 import time
 
+import copy
 from core import ACVMLoss
 from datasets.seq_cifar100 import build_task_loaders
 from models import PromptedViT, DynamicSemanticAnchor
@@ -34,6 +35,9 @@ def main():
     seen_classes_str = []
     seen_classes_idx = []
 
+    prev_visual_encoder = None
+    prev_anchor_generator = None
+
     for task_id in range(num_tasks):
         print(f"\n" + "=" * 40)
         print(f" START TRAINING TASK {task_id + 1}/{num_tasks} ")
@@ -65,12 +69,30 @@ def main():
 
                 z = visual_encoder(images)
 
+                all_anchors = []
+                for idx, cls_name in enumerate(seen_classes_str):
+                    if idx < task_id * len(current_classes_str) and prev_anchor_generator is not None:
+                        with torch.no_grad():
+                            old_anchor = prev_anchor_generator(cls_name).detach()
+                        all_anchors.append(old_anchor)
+                    else:
+                        all_anchors.append(anchor_generator(cls_name))
+
                 all_anchors = torch.stack([anchor_generator(cls_name) for cls_name in seen_classes_str])
 
                 target_anchors = all_anchors[labels]
 
                 optimizer.zero_grad()
                 total_loss, loss_m, loss_spread = criterion(z, target_anchors, all_anchors, labels)
+
+                if prev_visual_encoder is not None and prev_anchor_generator is not None:
+                    with torch.no_grad():
+                        z_old = prev_visual_encoder(images).detach()
+                        past_classes = seen_classes_str[:task_id * len(current_classes_str)]
+                        past_anchors = torch.stack([prev_anchor_generator(c) for c in past_classes]).detach()
+
+                    loss_kd = criterion.compute_semantic_distance_loss(z, z_old, past_anchors)
+                    total_loss = total_loss + 1.0 * loss_kd
 
                 total_loss.backward()
                 optimizer.step()
@@ -90,7 +112,13 @@ def main():
         anchor_generator.eval()
 
         with torch.no_grad():
-            all_anchors_eval = torch.stack([anchor_generator(cls_name) for cls_name in seen_classes_str])
+            all_anchors_eval = []
+            for idx, cls_name in enumerate(seen_classes_str):
+                if idx < task_id * len(current_classes_str) and prev_anchor_generator is not None:
+                    all_anchors_eval.append(prev_anchor_generator(cls_name).detach())
+                else:
+                    all_anchors_eval.append(anchor_generator(cls_name))
+            all_anchors_eval = torch.stack(all_anchors_eval)
 
             for eval_task_id in range(task_id + 1):
                 eval_loader = task_loaders[eval_task_id]['test']
@@ -111,6 +139,16 @@ def main():
         print(f"\n>>> OVERALL RESULT AFTER TASK {task_id + 1}:")
         print(f"    Average Accuracy (A_{task_id + 1}): {avg_acc:.2%}")
         print(f"    Forgetting: {forgetting:.2%}")
+
+        prev_visual_encoder = copy.deepcopy(visual_encoder)
+        prev_anchor_generator = copy.deepcopy(anchor_generator)
+
+        prev_visual_encoder.eval()
+        prev_anchor_generator.eval()
+        for param in prev_visual_encoder.parameters():
+            param.requires_grad = False
+        for param in prev_anchor_generator.parameters():
+            param.requires_grad = False
 
     print("\n" + "=" * 50)
     print(" ALL DONE ")
