@@ -1,10 +1,11 @@
+import numpy as np
 import torch
 from torch.optim import Adam
 import time
 
 import argparse
 import copy
-from core import ACVMLoss
+from core import ACVMLoss, FeatureCVAE, cvae_loss_fn
 from datasets.seq_cifar100 import build_task_loaders
 from models import PromptedViT, DynamicSemanticAnchor
 from utils import ContinualMetrics
@@ -34,7 +35,7 @@ def main():
     print(f"[INFO] Device: {device}")
 
     print("[INFO] Initializing PromptedViT and DynamicSemanticAnchor")
-    visual_encoder = PromptedViT(model_name='vit_small_patch16_224', prompt_length=10).to(device)
+    visual_encoder = PromptedViT(model_name='vit_small_patch16_224', prompt_length=args.prompt_length).to(device)
     anchor_generator = (
         DynamicSemanticAnchor(model_name='sentence-transformers/all-MiniLM-L6-v2', ctx_length=args.ctx_length)
         .to(device))
@@ -48,6 +49,10 @@ def main():
         {'params': visual_encoder.visual_prompts, 'lr': args.lr},
         {'params': anchor_generator.ctx, 'lr': args.lr}
     ], weight_decay=1e-4)
+
+    generator = FeatureCVAE(embed_dim=384, latent_dim=128, num_classes=100).to(device)
+    gen_optimizer = Adam(generator.parameters(), lr=0.001)
+    prev_generator = None
 
     print("[INFO] Preparing dataset Seq-CIFAR100")
     task_loaders, task_classes_list = build_task_loaders(data_dir='./data', num_tasks=num_tasks,
@@ -90,7 +95,19 @@ def main():
                 images = images.to(device)
                 labels = labels.to(device)
 
-                z = visual_encoder(images)
+                z_real = visual_encoder(images)
+                if task_id > 0 and prev_generator is not None:
+                    past_classes_idx = seen_classes_idx[:task_id * len(current_classes_str)]
+                    old_labels = torch.tensor(np.random.choice(past_classes_idx, 32)).to(device)
+
+                    with torch.no_grad():
+                        z_fake = prev_generator.generate(old_labels, device).detach()
+
+                    z_combined = torch.cat([z_real, z_fake])
+                    labels_combined = torch.cat([labels, old_labels])
+                else:
+                    z_combined = z_real
+                    labels_combined = labels
 
                 new_anchors = torch.stack([anchor_generator(cls_name) for cls_name in current_classes_str])
 
@@ -100,22 +117,30 @@ def main():
                 else:
                     all_anchors = new_anchors
 
-                target_anchors = all_anchors[labels]
+                target_anchors = all_anchors[labels_combined]
 
                 optimizer.zero_grad()
-                total_loss, loss_m, loss_spread = criterion(z, target_anchors, all_anchors, labels)
+                total_loss, loss_m, loss_spread = criterion(z_combined, target_anchors, all_anchors, labels_combined)
 
                 if prev_visual_encoder is not None:
                     with torch.no_grad():
                         z_old = prev_visual_encoder(images).detach()
-                        past_anchors = torch.stack(global_frozen_anchors).to(device)  # <--- Lấy thẳng từ kho
+                        past_anchors = torch.stack(global_frozen_anchors).to(device)
 
-                    loss_kd = criterion.compute_semantic_distance_loss(z, z_old, past_anchors)
+                    loss_kd = criterion.compute_semantic_distance_loss(z_real, z_old, past_anchors)
                     total_loss = total_loss + args.lambda_kd * loss_kd
                     epoch_kd += loss_kd.item()
 
                 total_loss.backward()
                 optimizer.step()
+
+                z_for_gen = z_combined.detach()
+
+                gen_optimizer.zero_grad()
+                recon_z, mu, logvar = generator(z_for_gen, labels_combined)
+                loss_vae = cvae_loss_fn(recon_z, z_for_gen, mu, logvar)
+                loss_vae.backward()
+                gen_optimizer.step()
 
                 epoch_loss += total_loss.item()
                 epoch_triplet += loss_m.item()
@@ -165,6 +190,11 @@ def main():
         prev_visual_encoder = copy.deepcopy(visual_encoder)
         prev_visual_encoder.eval()
         for param in prev_visual_encoder.parameters():
+            param.requires_grad = False
+
+        prev_generator = copy.deepcopy(generator)
+        prev_generator.eval()
+        for param in prev_generator.parameters():
             param.requires_grad = False
 
     print("\n" + "=" * 50)
