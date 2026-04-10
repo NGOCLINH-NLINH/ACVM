@@ -50,6 +50,7 @@ def main():
         {'params': anchor_generator.ctx, 'lr': args.lr}
     ], weight_decay=1e-4)
 
+    print("[INFO] Loading Generator CVAE")
     generator = FeatureCVAE(embed_dim=384, latent_dim=128, num_classes=100).to(device)
     gen_optimizer = Adam(generator.parameters(), lr=0.001)
     prev_generator = None
